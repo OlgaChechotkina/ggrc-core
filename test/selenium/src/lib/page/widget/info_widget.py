@@ -7,18 +7,17 @@ import re
 
 from selenium.webdriver.common.by import By
 
-from lib import base, users
+from lib import base
 from lib.constants import (
     locator, objects, element, roles, regex, messages)
 from lib.constants.element import AdminWidgetCustomAttributes
 from lib.constants.locator import WidgetInfoAssessment, WidgetInfoControl
 from lib.element import widget_info, tab_containers, tables
-from lib.entities.entities_factory import CustomAttributeDefinitionsFactory
 from lib.entities.entity import CustomAttributeDefinitionEntity
 from lib.page.modal import update_object
 from lib.page.modal.set_value_for_asmt_ca import SetValueForAsmtDropdown
-from lib.page.widget.page_elements import CustomAttributeManager, \
-  CustomAttributeScope
+from lib.page.widget.page_elements import (
+    CustomAttributeManager, CustomAttributeScope)
 from lib.page.widget.page_mixins import (WithAssignFolder, WithObjectReview,
                                          WithPageElements)
 from lib.utils import selenium_utils, string_utils, help_utils
@@ -109,6 +108,8 @@ class InfoWidget(WithPageElements, base.Widget):
       self._extend_list_all_scopes_by_code()
       self._extend_list_all_scopes_by_cas()
     self.comment_area = self._comment_area()
+    self.cas_lbl_txt = self._elements.CAS.upper()
+    self.cas_scope = None
 
   def wait_save(self):
     """Wait for object to be saved and page to be updated.
@@ -225,9 +226,6 @@ class InfoWidget(WithPageElements, base.Widget):
     # pylint: disable=invalid-name
     # pylint: disable=too-many-branches
     selenium_utils.wait_for_js_to_load(self._driver)
-    # cas_locator = (self._locators.CAS_HEADERS_AND_VALUES if is_gcas_not_lcas
-    #                else self._locators.LCAS_HEADERS_AND_VALUES)
-    # cas_headers_and_values = self.info_widget_elem.find_elements(*cas_locator)
     cas_headers_and_values = CustomAttributeScope(
         self._browser).get_cas_scopes(is_gcas_not_lcas)
     dict_cas_scopes = {}
@@ -246,11 +244,6 @@ class InfoWidget(WithPageElements, base.Widget):
           cas_values.append(None)
         elif ca_val == "":
           cas_values.append(None)
-        # elif ca_val == users.SUPERUSER_EMAIL:
-        #   # Example User
-        #   cas_values.append(
-        #       unicode(objects.get_singular(objects.PEOPLE).title()))
-        #   bool
         elif isinstance(ca_val, bool):
           cas_values.append(ca_val)
         elif "/" in ca_val and len(ca_val) == 10:
@@ -265,6 +258,7 @@ class InfoWidget(WithPageElements, base.Widget):
     return dict_cas_scopes
 
   def convert_scopes_to_cad(self, scopes, is_gcas_not_lcas):
+    """Method to convert HTML scope to CAD."""
     cad_list = []
     types = {AdminWidgetCustomAttributes.CHECKBOX: "custom-attribute-checkbox",
              AdminWidgetCustomAttributes.DATE: "custom-attribute-date",
@@ -273,55 +267,53 @@ class InfoWidget(WithPageElements, base.Widget):
              AdminWidgetCustomAttributes.DROPDOWN: "custom-attribute-dropdown",
              AdminWidgetCustomAttributes.PERSON: "custom-attribute-person",
              }
-    if scopes.elements:
+    if scopes and scopes.elements:
       for scope in scopes.elements:
         attr_title = scope.text.splitlines()[0]
         cad = CustomAttributeDefinitionEntity(title=attr_title)
         cad_list.append(cad)
-        if not is_gcas_not_lcas:
-          ca_type = scope.get_attribute("class")
-          for type, html_type in types.iteritems():
-            if html_type in ca_type:
-              cad.attribute_type = type
+        if is_gcas_not_lcas:
+          ca_type = scope.find_element(
+              *self._locators.GCAS).get_attribute("class")
         else:
-          scope.find_element(By.CSS_SELECTOR, ' readonly-inline-content')
-    #         TBD
+          ca_type = scope.get_attribute("class")
+        for attr_type, html_type in types.iteritems():
+          if html_type in ca_type:
+            cad.attribute_type = attr_type
     return cad_list
-
 
   def fill_cas_attr_values(self, attrs, values, is_lcas):
     """Fill all local custom attribute with values."""
     selenium_utils.wait_for_js_to_load(self._driver)
-    dict_cas_scopes = {}
     catr = CustomAttributeManager(self._browser)
     for attr in attrs:
       elem_class = catr.get_attr_elem_class(attr)
       if is_lcas:
-        elem_class.set_lcas_from_inline(values[attr.id])
+        elem_class.set_lcas_from_inline(values[unicode(attr.title)])
         selenium_utils.wait_for_element_text(
-          self._driver, locator.WidgetInfoPanel.CA_SAVED_STATUS,
-          element.GenericWidget.ALL_CHANGES_SAVED)
+            self._driver, locator.WidgetInfoPanel.CA_SAVED_STATUS,
+            element.GenericWidget.ALL_CHANGES_SAVED)
       else:
-        elem_class.set_gcas_from_popup(values[attr.id])
-    if not is_lcas: self.close_edit_popup()
-    dict_cas_scopes[attr.title] = values[attr.id]
-    return dict_cas_scopes
+        elem_class.set_gcas_from_popup(values[unicode(attr.title)])
+    if not is_lcas:
+      self.close_edit_popup()
 
   def close_edit_popup(self):
+    """Close edit popup."""
     base.Button(self._driver,
-                (By.CSS_SELECTOR, '[data-toggle="modal-submit"]')).click()
+                locator.ModalEditObject.BUTTON_SAVE_AND_CLOSE).click()
     selenium_utils.get_when_invisible(
-      self._driver, locator.ModalEditAsmt.MODAL_CSS)
+        self._driver, locator.BaseModalCreateNew.MODAL_CSS)
 
   def collect_cas_attr_name_value(self, attrs, is_gcas_not_lcas):
-    """Collect all global attributes and its values"""
+    """Collect all global attributes and its values."""
     list_text_cas_scopes = []
     catr = CustomAttributeManager(self._browser)
     for attr in attrs:
       if attr.attribute_type:
         elem_class = catr.get_attr_elem_class(attr)
         value = (
-            elem_class.get_gcas_from_inline()
+            elem_class.get_gcas_from_popup()
             if is_gcas_not_lcas else elem_class.get_lcas_from_inline()
         )
         list_text_cas_scopes.append([attr.title, value])
@@ -532,11 +524,7 @@ class Assessments(InfoWidget):
     self.asmt_type_txt = objects.get_obj_type(self.asmt_type.text)
     self.mapped_objects_lbl_txt = self._elements.MAPPED_OBJECTS.upper()
     self.mapped_objects_titles_txt = self._get_mapped_objs_titles_txt()
-    # self.lcas_scope_txt = self.get_headers_and_values_dict_from_cas_scopes(
-    #     is_gcas_not_lcas=False)
     self.evidence_urls = self._assessment_evidence_urls()
-    self.lcas_scope_txt = self.get_headers_and_values_dict_from_cas_scopes(
-        is_gcas_not_lcas=False)
     self.creators_lbl_txt, self.creators_txt = (
         self.get_header_and_value_txt_from_people_scopes(
             self._elements.CREATORS.upper()))
@@ -562,8 +550,6 @@ class Assessments(InfoWidget):
          self.comments_scopes_txt, self.asmt_type_txt])
     self._extend_list_all_scopes(["evidence_urls"],
                                  [self.evidence_urls.get_urls()])
-    self.cas_lbl_txt = self._elements.CAS.upper()
-    self.cas_scope = None
 
   def _get_mapped_objs_titles_txt(self):
     """Return lists of str for mapped snapshots titles text from current tab.
@@ -586,16 +572,6 @@ class Assessments(InfoWidget):
     self._extend_list_all_scopes_by_code()
     self._extend_list_all_scopes_by_cas()
     return dict(zip(self.list_all_headers_txt, self.list_all_values_txt))
-
-  def _extend_list_all_scopes_by_cas(self):
-    """Extend attributes related to 'local and global custom attributes' and
-    extend 'list all scopes' if 'Other Attributes' tab opened.
-    """
-    # todo: implement separate entities' model for lcas and gcas
-    if (self.tab_container.tab_controller.active_tab.text ==
-            element.AssessmentTabContainer.OTHER_ATTRS_TAB):
-      self.cas_scope = self.get_headers_and_values_dict_from_cas_scopes()
-      self._extend_list_all_scopes(self.cas_lbl_txt, self.cas_scope)
 
   def _extend_list_all_scopes_by_lcas(self):
     """Extend attributes related to 'local and global custom attributes' and
@@ -641,6 +617,16 @@ class Assessments(InfoWidget):
         self.info_widget_elem, dropdown_locator)
     base.DropdownStatic(self.info_widget_elem,
                         dropdown_locator).select(option_value)
+
+  def _extend_list_all_scopes_by_cas(self):
+    """Extend attributes related to 'local and global custom attributes' and
+    extend 'list all scopes' if 'Other Attributes' tab opened.
+    """
+    self.cas_lbl_txt = self._elements.CAS.upper()
+    self.open_info_3bbs().select_edit()
+    self.cas_scope = self.get_headers_and_values_dict_from_cas_scopes()
+    self._extend_list_all_scopes(self.cas_lbl_txt, self.cas_scope)
+    self.close_edit_popup()
 
   def edit_answers(self):
     """Click to Edit Answers and Confirm"""
