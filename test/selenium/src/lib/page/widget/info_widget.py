@@ -10,14 +10,12 @@ from selenium.webdriver.common.by import By
 from lib import base
 from lib.constants import (
     locator, objects, element, roles, regex, messages)
-from lib.constants.element import AdminWidgetCustomAttributes
 from lib.constants.locator import WidgetInfoAssessment, WidgetInfoControl
 from lib.element import widget_info, tab_containers, tables
-from lib.entities.entity import CustomAttributeDefinitionEntity
 from lib.page.modal import update_object
 from lib.page.modal.set_value_for_asmt_ca import SetValueForAsmtDropdown
-from lib.page.widget.page_elements import (
-    CustomAttributeManager, CustomAttributeScope)
+from lib.page.widget.page_elements import (CustomAttributeManager,
+                                           CustomAttribute)
 from lib.page.widget.page_mixins import (WithAssignFolder, WithObjectReview,
                                          WithPageElements)
 from lib.utils import selenium_utils, string_utils, help_utils
@@ -225,91 +223,52 @@ class InfoWidget(WithPageElements, base.Widget):
     """
     # pylint: disable=invalid-name
     # pylint: disable=too-many-branches
-    selenium_utils.wait_for_js_to_load(self._driver)
-    cas_headers_and_values = CustomAttributeScope(
-        self._browser).get_cas_scopes(is_gcas_not_lcas)
-    dict_cas_scopes = {}
-    # get all headers as list
-    cas_headers = []
-    cads = self.convert_scopes_to_cad(cas_headers_and_values, is_gcas_not_lcas)
-    list_text_cas_scopes = self.collect_cas_attr_name_value(
-        cads, is_gcas_not_lcas)
-    if list_text_cas_scopes:
-      cas_headers, _cas_values = [list(text_cas_scope) for text_cas_scope
-                                  in zip(*list_text_cas_scopes)]
-      # conversion
-      cas_values = []
-      for ca_val in _cas_values:
-        if ca_val is None:
-          cas_values.append(None)
-        elif ca_val == "":
-          cas_values.append(None)
-        elif isinstance(ca_val, bool):
-          cas_values.append(ca_val)
-        elif "/" in ca_val and len(ca_val) == 10:
-          # Date
-          _date = ca_val.split("/")
-          cas_values.append(unicode("{y}-{m}-{d}".format(
-              y=_date[2], m=_date[0], d=_date[1])))
-        else:
-          # Other
-          cas_values.append(ca_val.strip())
-      dict_cas_scopes = dict(zip(cas_headers, cas_values))
-    return dict_cas_scopes
+    custom_attributes = {}
+    all_ca_titles = CustomAttribute.retrieve_all_ca_titles(self._browser,
+                                                           is_gcas_not_lcas)
+    ca_manager = CustomAttributeManager(self._browser)
+    for ca_title in all_ca_titles:
+      p_elem = ca_manager.find_cas_pe_by_title(ca_title, is_gcas_not_lcas)
+      value = (
+          p_elem.get_gcas_from_popup()
+          if is_gcas_not_lcas else p_elem.get_lcas_from_inline()
+      )
+      custom_attributes[ca_title] = InfoWidget.convert_value(value)
+
+    return custom_attributes
 
   @classmethod
-  def convert_scopes_to_cad(cls, scopes, is_gcas_not_lcas):
-    """Method to convert HTML scope to CAD."""
-    cad_list = []
-    types = {AdminWidgetCustomAttributes.CHECKBOX: "custom-attribute-checkbox",
-             AdminWidgetCustomAttributes.DATE: "custom-attribute-date",
-             AdminWidgetCustomAttributes.RICH_TEXT: "custom-attribute-text",
-             AdminWidgetCustomAttributes.TEXT: "custom-attribute-input",
-             AdminWidgetCustomAttributes.DROPDOWN: "custom-attribute-dropdown",
-             AdminWidgetCustomAttributes.PERSON: "custom-attribute-person",
-             }
-    for scope in scopes:
-      attr_title = scope.text.splitlines()[0]
-      cad = CustomAttributeDefinitionEntity(title=attr_title)
-      cad_list.append(cad)
-      if is_gcas_not_lcas:
-        ca_type = scope.element(tag_name='custom-attributes-field').class_name
-      else:
-        ca_type = scope.class_name
-      for attr_type, html_type in types.iteritems():
-        if html_type in ca_type:
-          cad.attribute_type = attr_type
-    return cad_list
+  def convert_value(cls, ca_val):
+    """Convert value to unified format.
+    Applicable for ui retrieved values"""
+    # pylint: disable=no-else-return
+    if ca_val in (None, ""):
+      return None
+    elif isinstance(ca_val, bool):
+      return ca_val
+    elif "/" in ca_val and len(ca_val) == 10:
+      # Date
+      _date = ca_val.split("/")
+      return unicode("{y}-{m}-{d}".format(
+          y=_date[2], m=_date[0], d=_date[1]))
+    else:
+      return ca_val
 
-  def fill_cas_attr_values(self, attrs, values, is_lcas):
+  def fill_cas_attr_values(self, cavs, is_gcas_not_lcas):
     """Fill all local custom attribute with values."""
     selenium_utils.wait_for_js_to_load(self._driver)
     catr = CustomAttributeManager(self._browser)
-    for attr in attrs:
-      elem_class = catr.get_attr_elem_class(attr)
-      if is_lcas:
-        elem_class.set_lcas_from_inline(values[unicode(attr.title)])
+    for attr_title in cavs.keys():
+      elem_class = catr.find_cas_pe_by_title(attr_title, is_gcas_not_lcas)
+      if is_gcas_not_lcas:
+        elem_class.set_gcas_from_popup(cavs[unicode(attr_title)])
+      else:
+        elem_class.set_lcas_from_inline(cavs[unicode(attr_title)])
         selenium_utils.wait_for_element_text(
             self._driver, locator.WidgetInfoPanel.CA_SAVED_STATUS,
             element.GenericWidget.ALL_CHANGES_SAVED)
-      else:
-        elem_class.set_gcas_from_popup(values[unicode(attr.title)])
-    if not is_lcas:
+    if is_gcas_not_lcas:
       self.edit_popup.close_and_save()
-
-  def collect_cas_attr_name_value(self, attrs, is_gcas_not_lcas):
-    """Collect all global attributes and its values."""
-    list_text_cas_scopes = []
-    catr = CustomAttributeManager(self._browser)
-    for attr in attrs:
-      if attr.attribute_type:
-        elem_class = catr.get_attr_elem_class(attr)
-        value = (
-            elem_class.get_gcas_from_popup()
-            if is_gcas_not_lcas else elem_class.get_lcas_from_inline()
-        )
-        list_text_cas_scopes.append([attr.title, value])
-    return list_text_cas_scopes
 
   def get_info_widget_obj_scope(self):
     """Get dict from object (text scope) which displayed on info page or
